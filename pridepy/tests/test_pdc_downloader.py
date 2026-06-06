@@ -12,6 +12,7 @@ from pridepy.pdc.downloader import download_pdc_files
 
 
 ABC_MD5 = hashlib.md5(b"abc").hexdigest()
+DOWNLOAD_HTTP_FILE = "pridepy.pdc.downloader.transport.download_http_file"
 
 
 def _pdc_file(name="sample.psm", url="https://example.org/sample.psm", md5sum=ABC_MD5, study_id="PDC000109"):
@@ -38,7 +39,7 @@ def _fetcher(files):
     return fetch_files
 
 
-def _write_data(_url, target):
+def _write_data(_url, target, **_kwargs):
     with open(target, "wb") as handle:
         handle.write(b"abc")
 
@@ -53,7 +54,7 @@ class TestPDCDownloader(TestCase):
             with open(target, "wb") as handle:
                 handle.write(b"abc")
 
-            with patch("pridepy.pdc.downloader.transport._parallel_download") as mock_download:
+            with patch(DOWNLOAD_HTTP_FILE) as mock_download:
                 stats = download_pdc_files(
                     accession="PDC000109",
                     file_type="psm",
@@ -71,7 +72,7 @@ class TestPDCDownloader(TestCase):
         pdc_file = _pdc_file()
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "pridepy.pdc.downloader.transport._parallel_download",
+                DOWNLOAD_HTTP_FILE,
                 side_effect=_write_data,
             ):
                 stats = download_pdc_files(
@@ -102,7 +103,7 @@ class TestPDCDownloader(TestCase):
                 handle.write("pdc_id,file-type\nPDC000109,psm\nPDC000110,mzid\n")
 
             with patch(
-                "pridepy.pdc.downloader.transport._parallel_download",
+                DOWNLOAD_HTTP_FILE,
                 side_effect=_write_data,
             ):
                 stats = download_pdc_files(
@@ -123,14 +124,14 @@ class TestPDCDownloader(TestCase):
     def test_threads_use_multipart_downloader(self):
         pdc_file = _pdc_file()
         with tempfile.TemporaryDirectory() as tmp_dir:
-            def fake_multipart(_url, target, threads=1):
-                assert threads == 4
+            def fake_download(_url, target, download_threads=1):
+                assert download_threads == 4
                 _write_data(_url, target)
 
             with patch(
-                "pridepy.pdc.downloader.transport._multipart_download",
-                side_effect=fake_multipart,
-            ) as mock_multipart:
+                DOWNLOAD_HTTP_FILE,
+                side_effect=fake_download,
+            ) as mock_download:
                 download_pdc_files(
                     accession="PDC000109",
                     file_type="psm",
@@ -140,13 +141,13 @@ class TestPDCDownloader(TestCase):
                     fetch_files=_fetcher([pdc_file]),
                 )
 
-            mock_multipart.assert_called_once()
+            mock_download.assert_called_once()
 
     def test_missing_md5_falls_back_to_size_validation(self):
         pdc_file = _pdc_file(md5sum=None)
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "pridepy.pdc.downloader.transport._parallel_download",
+                DOWNLOAD_HTTP_FILE,
                 side_effect=_write_data,
             ):
                 stats = download_pdc_files(
@@ -186,7 +187,7 @@ class TestPDCDownloader(TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "pridepy.pdc.downloader.transport._parallel_download",
+                DOWNLOAD_HTTP_FILE,
                 side_effect=_write_data,
             ):
                 stats = download_pdc_files(
@@ -207,7 +208,7 @@ class TestPDCDownloader(TestCase):
         pdc_file = _pdc_file(md5sum="ffffffffffffffffffffffffffffffff")
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "pridepy.pdc.downloader.transport._parallel_download",
+                DOWNLOAD_HTTP_FILE,
                 side_effect=_write_data,
             ):
                 with pytest.raises(RuntimeError, match="Failed to download 1 PDC file"):
@@ -232,7 +233,7 @@ class TestPDCDownloader(TestCase):
         http_error.response = response
         seen_urls = []
 
-        def fake_download(url, target):
+        def fake_download(url, target, **_kwargs):
             seen_urls.append(url)
             if url == "https://example.org/old":
                 raise http_error
@@ -242,7 +243,7 @@ class TestPDCDownloader(TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
-                "pridepy.pdc.downloader.transport._parallel_download",
+                DOWNLOAD_HTTP_FILE,
                 side_effect=fake_download,
             ), patch("pridepy.pdc.downloader.time.sleep"):
                 stats = download_pdc_files(

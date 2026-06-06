@@ -49,26 +49,54 @@ class TestDownloadFilesByUrl(TestCase):
             mock_http.assert_called_once()
             assert os.path.exists(target)
 
-    def test_threads_use_multipart_http(self):
+    def test_threads_use_public_http_file(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             target = os.path.join(tmp_dir, "sample.raw")
 
-            def fake_multipart(_url, target_path, threads=1, position=0):
-                assert threads == 4
+            def fake_http_file(_url, target_path, position=0, download_threads=1):
+                assert download_threads == 4
                 assert position == 0
                 _touch_valid(target_path)
 
             with patch.object(
-                by_url.transport, "_multipart_download", side_effect=fake_multipart
-            ) as mock_multipart:
+                by_url.transport, "download_http_file", side_effect=fake_http_file
+            ) as mock_http_file:
                 Files.download_files_by_url(
                     urls=["https://example.org/sample.raw"],
                     output_folder=tmp_dir,
                     download_threads=4,
                 )
 
-            mock_multipart.assert_called_once()
+            mock_http_file.assert_called_once()
             assert os.path.exists(target)
+
+    def test_public_http_file_replaces_final_after_part_completes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = os.path.join(tmp_dir, "sample.raw")
+            part = target + ".part"
+            with open(target, "wb") as handle:
+                handle.write(b"old")
+
+            def fake_multipart(_url, target_path, **_kwargs):
+                assert target_path == part
+                with open(target, "rb") as handle:
+                    assert handle.read() == b"old"
+                with open(target_path, "wb") as handle:
+                    handle.write(b"new")
+
+            with patch.object(
+                transport, "_multipart_download", side_effect=fake_multipart
+            ):
+                transport.download_http_file(
+                    "https://example.org/sample.raw",
+                    target,
+                    download_threads=4,
+                    multipart_min_size_bytes=1,
+                )
+
+            assert not os.path.exists(part)
+            with open(target, "rb") as handle:
+                assert handle.read() == b"new"
 
     def test_multipart_failure_removes_preallocated_file(self):
         class FakeHeadResponse:
@@ -83,6 +111,37 @@ class TestDownloadFilesByUrl(TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             target = os.path.join(tmp_dir, "large.raw")
+            with patch.object(
+                transport.Util, "create_session_with_retries", return_value=FakeSession()
+            ), patch.object(
+                transport, "_download_range", side_effect=RuntimeError("range failed")
+            ):
+                with pytest.raises(RuntimeError, match="range failed"):
+                    transport._multipart_download(
+                        "https://example.org/large.raw",
+                        target,
+                        threads=2,
+                        min_size_bytes=1,
+                    )
+
+            assert not os.path.exists(target)
+
+    def test_multipart_existing_full_size_file_is_not_trusted(self):
+        class FakeHeadResponse:
+            headers = {"content-length": str(20 * 1024 * 1024), "accept-ranges": "bytes"}
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def head(self, *_args, **_kwargs):
+                return FakeHeadResponse()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = os.path.join(tmp_dir, "large.raw")
+            with open(target, "wb") as handle:
+                handle.truncate(20 * 1024 * 1024)
+
             with patch.object(
                 transport.Util, "create_session_with_retries", return_value=FakeSession()
             ), patch.object(

@@ -109,10 +109,7 @@ def _download_to_part(pdc_file: PDCFile, target: Path, checksum_check: bool, dow
 
     try:
         LOGGER.info("Downloading %s/%s", pdc_file.study_id, pdc_file.file_name)
-        if download_threads > 1:
-            transport._multipart_download(pdc_file.url, str(part), threads=download_threads)
-        else:
-            transport._parallel_download(pdc_file.url, str(part))
+        transport.download_http_file(pdc_file.url, str(part), download_threads=download_threads)
 
         valid, reason = validate_pdc_file(part, pdc_file, checksum_check)
         if not valid:

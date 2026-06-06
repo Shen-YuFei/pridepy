@@ -96,18 +96,22 @@ def _dispatch_url_scheme(
 ) -> None:
     """Route a parsed URL to its protocol-specific downloader.
 
-    ``protocol='globus'`` swaps the http/https single-connection streamer
-    for :func:`pridepy.download.transport._parallel_download` (single-connection
-    with progress bar). ftp:// URLs are unaffected.
+    ``download_threads > 1`` takes precedence for http/https URLs and uses
+    the shared multipart-capable HTTP transport. Otherwise,
+    ``protocol='globus'`` uses the shared single-file HTTP transport with
+    progress bar. ftp:// URLs are unaffected.
     """
     scheme = (parsed.scheme or "").lower()
     if scheme in ("http", "https"):
         if download_threads and download_threads > 1:
-            transport._multipart_download(
-                parsed.geturl(), target, threads=download_threads, position=position
+            transport.download_http_file(
+                parsed.geturl(),
+                target,
+                position=position,
+                download_threads=download_threads,
             )
         elif protocol == "globus":
-            transport._parallel_download(parsed.geturl(), target, position=position)
+            transport.download_http_file(parsed.geturl(), target, position=position)
         else:
             _http_download_url(parsed.geturl(), target)
     elif scheme == "ftp":

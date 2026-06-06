@@ -328,8 +328,9 @@ class PrideProvider(Provider):
         """Download a single file via globus; used as a worker target.
 
         When ``download_threads`` > 1 the file is fetched via parallel HTTP
-        Range segments (:func:`transport._multipart_download`); otherwise a
-        single-connection stream is used.
+        Range segments; otherwise a single-connection stream is used. The
+        shared HTTP transport writes to a temporary part file before replacing
+        the final target.
         """
         download_url = PrideProvider._get_download_url(file, "globus")
         new_file_path = PrideProvider.get_output_file_name(download_url, file, output_folder)
@@ -340,12 +341,12 @@ class PrideProvider(Provider):
 
         for attempt in range(1, max_retries + 1):
             try:
-                if download_threads and download_threads > 1:
-                    transport._multipart_download(
-                        download_url, new_file_path, threads=download_threads, position=position,
-                    )
-                else:
-                    transport._parallel_download(download_url, new_file_path, position=position)
+                transport.download_http_file(
+                    download_url,
+                    new_file_path,
+                    position=position,
+                    download_threads=download_threads,
+                )
                 return
             except Exception as e:
                 logging.warning(f"Attempt {attempt}/{max_retries} failed for {file.get('fileName', '?')}: {e}")

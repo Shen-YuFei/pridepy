@@ -11,6 +11,7 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ftplib import FTP
+from threading import Lock
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -625,7 +626,15 @@ def _parallel_download(url, file_path, position=0):
             )
 
 
-def _download_range(url, file_path, start, end, pbar, max_retries=3):
+def _download_range(
+    url,
+    file_path,
+    start,
+    end,
+    pbar,
+    progress_lock=None,
+    max_retries=3,
+):
     """Download a byte range directly into the target file using seek.
 
     On transient failures (e.g. ``IncompleteRead``) the segment resumes
@@ -639,7 +648,7 @@ def _download_range(url, file_path, start, end, pbar, max_retries=3):
         try:
             session = Util.create_session_with_retries()
             headers = {"Range": f"bytes={cursor}-{end}"}
-            with session.get(url, headers=headers, stream=True, timeout=(15, 15)) as r:
+            with session.get(url, headers=headers, stream=True, timeout=(30, 60)) as r:
                 r.raise_for_status()
                 if r.status_code != 206:
                     raise RuntimeError(f"Server did not honor Range request: {r.status_code}")
@@ -652,7 +661,11 @@ def _download_range(url, file_path, start, end, pbar, max_retries=3):
                         if chunk:
                             f.write(chunk)
                             cursor += len(chunk)
-                            pbar.update(len(chunk))
+                            if progress_lock is None:
+                                pbar.update(len(chunk))
+                            else:
+                                with progress_lock:
+                                    pbar.update(len(chunk))
             return
         except (requests.RequestException, RuntimeError, OSError) as exc:
             logging.warning(
@@ -683,13 +696,11 @@ def _read_http_download_metadata(url):
 
 
 def _prepare_multipart_target(file_path, total_size):
-    if os.path.exists(file_path) and os.path.getsize(file_path) == total_size:
-        logging.info("File already complete: %s", file_path)
-        return False
+    if os.path.exists(file_path):
+        os.remove(file_path)
 
     with open(file_path, "wb") as pre:
         pre.truncate(total_size)
-    return True
 
 
 def _build_download_ranges(total_size, threads):
@@ -713,8 +724,17 @@ def _download_multipart_ranges(url, file_path, ranges, total_size, position):
             leave=True,
         ) as pbar:
             with ThreadPoolExecutor(max_workers=len(ranges)) as executor:
+                progress_lock = Lock()
                 futures = [
-                    executor.submit(_download_range, url, file_path, start, end, pbar)
+                    executor.submit(
+                        _download_range,
+                        url,
+                        file_path,
+                        start,
+                        end,
+                        pbar,
+                        progress_lock,
+                    )
                     for start, end in ranges
                 ]
                 for future in as_completed(futures):
@@ -732,8 +752,9 @@ def _multipart_download(url, file_path, threads=8, position=0, min_size_bytes=10
     ``Accept-Ranges: bytes``, the total size is unknown, or the file is
     smaller than ``min_size_bytes`` (default 10 MB).
 
-    Threads are clamped to ``[1, 32]``. Resume is best-effort: if an existing
-    file matches the expected total size, it is treated as complete.
+    Threads are clamped to ``[1, 32]``. The target path is recreated before
+    writing; callers that need skip/resume semantics should manage those
+    decisions before calling this helper.
     """
     parent = os.path.dirname(file_path)
     if parent:
@@ -754,11 +775,44 @@ def _multipart_download(url, file_path, threads=8, position=0, min_size_bytes=10
         _parallel_download(url, file_path, position=position)
         return
 
-    if not _prepare_multipart_target(file_path, total_size):
-        return
+    _prepare_multipart_target(file_path, total_size)
 
     ranges = _build_download_ranges(total_size, threads)
     _download_multipart_ranges(url, file_path, ranges, total_size, position)
+
+
+def download_http_file(
+    url,
+    file_path,
+    position=0,
+    download_threads=1,
+    multipart_min_size_bytes=10 * 1024 * 1024,
+):
+    """Download one HTTP(S) URL to a final file via a temporary part file."""
+    parent = os.path.dirname(file_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    part_path = f"{file_path}.part"
+    if os.path.exists(part_path):
+        os.remove(part_path)
+
+    try:
+        if download_threads and download_threads > 1:
+            _multipart_download(
+                url,
+                part_path,
+                threads=download_threads,
+                position=position,
+                min_size_bytes=multipart_min_size_bytes,
+            )
+        else:
+            _parallel_download(url, part_path, position=position)
+        os.replace(part_path, file_path)
+    except (requests.RequestException, RuntimeError, OSError, KeyboardInterrupt):
+        if os.path.exists(part_path):
+            os.remove(part_path)
+        raise
 
 
 def _http_download_one(
@@ -771,10 +825,10 @@ def _http_download_one(
     download_threads: int = 1,
 ) -> None:
     """
-    Download a single HTTP(S) URL with HEAD-then-Range resume and retry.
-    Used as the worker target for both the serial loop and the parallel
-    ThreadPoolExecutor path. Reuses :meth:`_parallel_download` so the same
-    resume / restart-on-non-206 behaviour is shared with globus downloads.
+    Download a single HTTP(S) URL with retries. Used as the worker target
+    for both the serial loop and the parallel ThreadPoolExecutor path.
+    Delegates to :func:`download_http_file`, so the final target is only
+    replaced after the temporary part file completes successfully.
 
     ``relative_path`` (when given) is the dataset-relative destination, so
     files keep their collection layout instead of being flattened to the
@@ -791,10 +845,12 @@ def _http_download_one(
     last_error: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
-            if download_threads and download_threads > 1:
-                _multipart_download(url, local_path, threads=download_threads, position=position)
-            else:
-                _parallel_download(url, local_path, position=position)
+            download_http_file(
+                url,
+                local_path,
+                position=position,
+                download_threads=download_threads,
+            )
             logging.info(f"Successfully downloaded {local_path}")
             return
         except Exception as e:
