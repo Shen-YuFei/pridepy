@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import sys
 from typing import Optional
 
 import click
@@ -9,7 +10,9 @@ from pridepy.download.client import Client as Files
 from pridepy.pdc import download_pdc_files as run_pdc_download
 from pridepy.project.project import Project
 
-PROTOCOL_CHOICES = click.Choice(["ftp", "aspera", "globus", "s3"], case_sensitive=False)
+PROTOCOL_CHOICES = click.Choice(
+    ["ftp", "aspera", "globus", "s3", "fire"], case_sensitive=False
+)
 
 
 @click.group()
@@ -28,7 +31,10 @@ def main():
     "--protocol",
     default="ftp",
     type=PROTOCOL_CHOICES,
-    help="Protocol to use for download: ftp, aspera, globus, s3. Default is ftp with fallback enabled.",
+    help="Protocol to use for download: ftp, aspera, globus, s3, fire. "
+    "'fire' uses the EBI-internal FIRE S3 endpoint (only reachable inside EBI "
+    "infrastructure; falls back to the public protocols elsewhere). "
+    "Default is ftp with fallback enabled.",
 )
 @click.option(
     "-o",
@@ -134,7 +140,10 @@ def download_all_public_raw_files(
     "--protocol",
     default="ftp",
     type=PROTOCOL_CHOICES,
-    help="Protocol to use for download: ftp, aspera, globus, s3. Default is ftp with fallback enabled.",
+    help="Protocol to use for download: ftp, aspera, globus, s3, fire. "
+    "'fire' uses the EBI-internal FIRE S3 endpoint (only reachable inside EBI "
+    "infrastructure; falls back to the public protocols elsewhere). "
+    "Default is ftp with fallback enabled.",
 )
 @click.option(
     "-o",
@@ -259,7 +268,10 @@ def download_all_public_category_files(
     "--protocol",
     default="ftp",
     type=PROTOCOL_CHOICES,
-    help="Protocol to use for download: ftp, aspera, globus, s3. Default is ftp with fallback enabled.",
+    help="Protocol to use for download: ftp, aspera, globus, s3, fire. "
+    "'fire' uses the EBI-internal FIRE S3 endpoint (only reachable inside EBI "
+    "infrastructure; falls back to the public protocols elsewhere). "
+    "Default is ftp with fallback enabled.",
 )
 @click.option("-f", "--file-name", required=True, help="fileName to be downloaded")
 @click.option(
@@ -396,10 +408,17 @@ def download_file_by_name(
     envvar="IPROX_USER",
     default=None,
     type=str,
-    help="iProX account username. Only used with --protocol aspera. The "
-    "password is never accepted as a command-line flag: it is read from "
-    "the IPROX_ASPERA_PASSWORD environment variable, or prompted for "
-    "securely (hidden input) if not set.",
+    help="Your registered iProX username. Required with --protocol aspera.",
+)
+@click.option(
+    "--aspera-key",
+    "aspera_key",
+    envvar="IPROX_ASPERA_KEY",
+    default=None,
+    type=str,
+    help="Optional Aspera private key for iProX (only with --protocol "
+    "aspera). If omitted, password auth is used via the "
+    "IPROX_ASPERA_PASSWORD env var or a secure prompt.",
 )
 def download_px_raw_files(
     accession: str,
@@ -410,14 +429,15 @@ def download_px_raw_files(
     parallel_files: int = 1,
     preserve_structure: bool = False,
     iprox_user: Optional[str] = None,
+    aspera_key: Optional[str] = None,
 ):
     """CLI wrapper to download raw files via ProteomeXchange XML."""
     files = Files()
     logging.info(f"PX accession/URL: {accession}")
 
-    password = os.environ.get("IPROX_ASPERA_PASSWORD")
-    if protocol.lower() == "aspera" and not password:
-        password = click.prompt("iProX Aspera password", hide_input=True)
+    aspera_password = os.environ.get("IPROX_ASPERA_PASSWORD")
+    if protocol.lower() == "aspera" and not aspera_key and not aspera_password and sys.stdin.isatty():
+        aspera_password = click.prompt("iProX Aspera password", hide_input=True)
 
     files.download_px_raw_files(
         accession,
@@ -428,7 +448,8 @@ def download_px_raw_files(
         download_threads=download_threads,
         parallel_files=parallel_files,
         iprox_user=iprox_user,
-        iprox_password=password,
+        aspera_key=aspera_key,
+        aspera_password=aspera_password,
     )
 
 
@@ -629,7 +650,10 @@ def _read_url_arguments(url_list_path, urls_csv=None):
     "--protocol",
     default="ftp",
     type=PROTOCOL_CHOICES,
-    help="Protocol to use for download: ftp, aspera, globus, s3. Default is ftp with fallback enabled.",
+    help="Protocol to use for download: ftp, aspera, globus, s3, fire. "
+    "'fire' uses the EBI-internal FIRE S3 endpoint (only reachable inside EBI "
+    "infrastructure; falls back to the public protocols elsewhere). "
+    "Default is ftp with fallback enabled.",
 )
 @click.option(
     "-F",
